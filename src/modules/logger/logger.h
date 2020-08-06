@@ -78,6 +78,13 @@ enum class MissionLogType : int32_t {
 	Geotagging =             2
 };
 
+enum class NpntLogType : int32_t
+{
+	Complete = 0,
+	Geofence = 1,
+
+};
+
 inline bool operator&(SDLogProfileMask a, SDLogProfileMask b)
 {
 	return static_cast<int32_t>(a) & static_cast<int32_t>(b);
@@ -175,9 +182,11 @@ private:
 	static constexpr size_t 	MAX_TOPICS_NUM = 90; /**< Maximum number of logged topics */
 	static constexpr int		MAX_MISSION_TOPICS_NUM = 5; /**< Maximum number of mission topics */
 	static constexpr unsigned	MAX_NO_LOGFILE = 999;	/**< Maximum number of log files */
+	static constexpr int 		MAX_NPNT_TOPICS_NUM = 1;
 	static constexpr const char	*LOG_ROOT[(int)LogType::Count] = {
 		PX4_STORAGEDIR "/log",
-		PX4_STORAGEDIR "/mission_log"
+		PX4_STORAGEDIR "/mission_log",
+		PX4_STORAGEDIR "/log"
 	};
 
 	struct LogFileName {
@@ -199,6 +208,12 @@ private:
 		unsigned min_delta_ms{0};        ///< minimum time between 2 topic writes [ms]
 		unsigned next_write_time{0};     ///< next time to write in 0.1 seconds
 	};
+
+	struct NpntSubscription{
+		unsigned min_delta_ms;		 ///< minimum time between 2 topic writes [ms]
+		unsigned next_write_time;	///< next time to write in 0.1 seconds
+	};
+
 
 	/**
 	 * Write an ADD_LOGGED_MSG to the log for a all current subscriptions and instances
@@ -377,6 +392,7 @@ private:
 
 	Statistics					_statistics[(int)LogType::Count];
 	hrt_abstime					_last_sync_time{0}; ///< last time a sync msg was sent
+	hrt_abstime 					prev_sync_time{0};
 
 	LogMode						_log_mode;
 	const bool					_log_name_timestamp;

@@ -60,11 +60,165 @@
 #include <uORB/topics/sensor_preflight.h>
 #include <uORB/topics/subsystem_info.h>
 #include <uORB/topics/system_power.h>
+#include <uORB/topics/vehicle_global_position.h>
+#include <uORB/topics/vehicle_gps_position.h>
+
+
+#include <uORB/topics/permission_artifat_value.h>
+#include <uORB/topics/connected_hardware.h>
+#include "npnt.hpp"
+#include "pa.h"
+#include <time.h>
 
 using namespace time_literals;
 
 namespace Preflight
 {
+
+
+
+
+struct tm* getTime();
+
+// static void get_current_hardware_profile(npnt::hard_info_t & hp){
+// 	uint8_t instance = (uint8_t)0;
+// 	uORB::SubscriptionData<sensor_accel_s> accel{ORB_ID(sensor_accel),instance};
+// 	uORB::SubscriptionData<sensor_baro_s> baro{ORB_ID(sensor_baro),instance};
+// 	uORB::SubscriptionData<sensor_gyro_s> gyro{ORB_ID(sensor_gyro),instance};
+// 	uORB::SubscriptionData<sensor_mag_s> mag{ORB_ID(sensor_mag),instance};
+
+
+// 	hp.accel_dev_id = accel.get().device_id;
+// 	hp.baro_dev_id = baro.get().device_id;
+// 	hp.gyro_dev_id = gyro.get().device_id;
+// 	hp.mag_dev_id = mag.get().device_id;
+// }
+
+static void publish_permission_artifat(pa::perm_a &permArt){
+	// Initialize permission artifat value struct
+	permission_artifat_value_s* perm_artifat = (permission_artifat_value_s*)malloc(1 * (sizeof(permission_artifat_value_s)));
+	//memset(&perm_artifat,0,sizeof(perm_artifat));
+	orb_advert_t perm_artifat_pub = orb_advertise(ORB_ID(permission_artifat_value),perm_artifat);
+	perm_artifat->timestamp = hrt_absolute_time();
+	perm_artifat->start_time = (uint64_t)mktime(permArt.startTime);
+	perm_artifat->end_time = (uint64_t)mktime(permArt.endTime);
+	uint8_t fence_size  = permArt.geoFenceSize;
+	perm_artifat->fence_size = fence_size;
+	char* pa = permArt.name;
+	int pa_ns = 0;
+
+	for(int i = 0; pa[i] != '\0';i++){
+		pa_ns ++;
+	}
+	for(int i=0 ; i <= pa_ns; i++){
+		perm_artifat->pa_name[i] = ((unsigned char)pa[i]);
+	}
+	//float geo_fence[fence_size * 2];
+	uint8_t index = 0;
+	for(uint8_t i = 0 ; i < fence_size; i++){
+		pa::latlong ll= permArt.geoFence[i];
+		perm_artifat->geo_fence[index++] = ll.lati;
+		perm_artifat->geo_fence[index++] = ll.longi;
+	}
+
+	// strcpy(perm_artifat.flight_purpose,permArt.flightPurpose);
+	// strcpy(perm_artifat.payload_details,permArt.payloadDetails);
+	// strcpy(perm_artifat.payload_weight,permArt.payloadWeight);
+
+	orb_publish(ORB_ID(permission_artifat_value),perm_artifat_pub,perm_artifat);
+	// orb_unadvertise(perm_artifat_pub);
+}
+
+
+struct tm* getTime() {
+    time_t rawtime;
+    struct tm * timeinfo;
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    return timeinfo;
+}
+
+
+static bool check_permission_artifat(orb_advert_t *mavlink_log_pub, char * artifat_path, const char* device_id){
+	bool permission_valid = false;
+	if(strcmp(artifat_path,"")==0){
+		mavlink_log_critical(mavlink_log_pub, "Preflight Fail: not a valid permission artifat");
+	}else{
+		pa::permissionArtifat permArt;
+		mavlink_log_info(mavlink_log_pub, "Preflight : Parsing file %s",artifat_path);
+		npnt::parsePermissionArtifat(mavlink_log_pub,permArt,artifat_path);
+		bool validPA = npnt::isValidPA(mavlink_log_pub,&permArt);
+		if(validPA){
+			if(npnt::isValidDrone(mavlink_log_pub,permArt.uinNo,device_id)){ // -1 is to be replaced with the Device id of the pixhawk
+			uint8_t instance = (uint8_t)0;
+			// subscribe to GPS data to supply it here..
+			float lati= 0.0f,longi= 0.0f; // lati and longi initialization
+			uORB::SubscriptionData<vehicle_global_position_s> gps{ORB_ID(vehicle_global_position), instance};
+			gps.update();
+			const vehicle_global_position_s pos = gps.get();
+
+			lati = (float)pos.lat;
+			longi = (float) pos.lon;
+			// mavlink_log_critical(mavlink_log_pub, "Preflight info: lat %f | long %f",(double)lati,(double) longi);
+			mavlink_log_info(mavlink_log_pub,"Timestamp :%f",(double)pos.timestamp);
+			if( npnt::isInGeoFence(mavlink_log_pub,permArt.geoFence,permArt.geoFenceSize,lati,longi)){
+				mavlink_log_info(mavlink_log_pub,"Valid GeoFence");
+				if(npnt::isValidTime(mavlink_log_pub,permArt.startTime,permArt.endTime)){
+					permission_valid = true;
+					mavlink_log_info(mavlink_log_pub,"Permission artifat authorized to fly");
+					publish_permission_artifat(permArt);
+				}else{
+					permission_valid = false;
+					mavlink_log_info(mavlink_log_pub,"Start time:%d - %d - %d",(*permArt.startTime).tm_mday,(*permArt.startTime).tm_mon, (*permArt.startTime).tm_year);
+					mavlink_log_info(mavlink_log_pub,"End time:%d - %d - %d",(*permArt.endTime).tm_mday,(*permArt.endTime).tm_mon,(*permArt.endTime).tm_year);
+					mavlink_log_info(mavlink_log_pub, "Preflight Fail: Invalid time span to fly drone");
+				}
+				mavlink_log_info(mavlink_log_pub,"Start time:%d - %d - %d",(*permArt.startTime).tm_mday,(*permArt.startTime).tm_mon, (*permArt.startTime).tm_year);
+					mavlink_log_info(mavlink_log_pub,"End time:%d - %d - %d",(*permArt.endTime).tm_mday,(*permArt.endTime).tm_mon,(*permArt.endTime).tm_year);
+
+			}else{
+				//Invlaid geofence
+				mavlink_log_info(mavlink_log_pub,"Start time:%d - %d - %d",(*permArt.startTime).tm_mday,(*permArt.startTime).tm_mon, (*permArt.startTime).tm_year);
+					mavlink_log_info(mavlink_log_pub,"End time:%d - %d - %d",(*permArt.endTime).tm_mday,(*permArt.endTime).tm_mon,(*permArt.endTime).tm_year);
+
+				permission_valid = true;
+				publish_permission_artifat(permArt);
+				if(lati - 0.0F  <= 1.0e-05f || longi - 0.0f  <= 1.0e-05f || lati - 0.0f  >= 1.0e-05f || longi - 0.0f  >= 1.0e-05f){
+					mavlink_log_info(mavlink_log_pub,"GPS position error ; lat:%.3f;long:%.3f;",(double)lati,(double)longi);
+				}else{
+					mavlink_log_info(mavlink_log_pub,"Fence Error,lat:%.3f;long:%.3f;size:%d",(double)lati,(double)longi,permArt.geoFenceSize);
+				}
+
+			}
+		} else{
+			//Drone permission artifat mismatch with id
+			permission_valid = false;
+			mavlink_log_info(mavlink_log_pub,"Preflight Fail: Drone permission artifat mismatch");
+		}
+	}else{
+		permission_valid = false;
+		mavlink_log_info(mavlink_log_pub, "Preflight Fail: Invalid permission artifat");
+	}
+	}
+	return permission_valid;
+}
+
+
+// static void publish_current_hardware_prof(npnt::hard_info_t &current_hardware_profile)
+// {
+// 	connected_hardware_s connected_hdwr;
+// 	memset(&connected_hdwr,0,sizeof(connected_hdwr));
+// 	orb_advert_t chdwr_pub = orb_advertise(ORB_ID(connected_hardware),&connected_hdwr);
+// 	connected_hdwr.timestamp = hrt_absolute_time();
+// 	connected_hdwr.mag_dev_id = current_hardware_profile.mag_dev_id;
+// 	connected_hdwr.accel_dev_id = current_hardware_profile.accel_dev_id;
+// 	connected_hdwr.baro_dev_id = current_hardware_profile.baro_dev_id;
+// 	connected_hdwr.gyro_dev_id = current_hardware_profile.gyro_dev_id;
+
+// 	orb_publish(ORB_ID(connected_hardware),chdwr_pub,&connected_hdwr);
+
+// }
+
 
 static bool check_calibration(const char *param_template, const int32_t device_id)
 {
@@ -982,6 +1136,28 @@ bool preflightCheck(orb_advert_t *mavlink_log_pub, vehicle_status_s &status, veh
 			failed = true;
 		}
 	}
+
+	/**
+	 * NPNT check starts from here
+	 *
+	 **/
+
+	// This is a sample device id designed for test purposes only @Tobe replaced once UIN number is obtained
+	const char* device_id = ((char*)"003400173135510D35333436");
+	/**
+	 * Check if the permission artefact is valid
+	 * */
+	// if(!check_permission_artifat(mavlink_log_pub,(char*)"test.xml",device_id)){ //@for SITL use this line
+	if(!check_permission_artifat(mavlink_log_pub,(char*)"/fs/microsd/test.xml",device_id)){  // @for Hardware use this line
+		// Valid permission artefact is not detected
+		mavlink_log_critical(mavlink_log_pub,"Invalid permission artifat!!");
+		// mavlink_log_critical(mavlink_log_pub,"Arming aborted!!");
+		failed = true;
+	}
+
+
+
+
 
 	/* Report status */
 	return !failed;

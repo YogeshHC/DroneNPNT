@@ -51,6 +51,7 @@ namespace logger
 enum class LogType {
 	Full = 0, //!< Normal, full size log
 	Mission,  //!< reduced mission log (e.g. for geotagging)
+	Npnt,
 
 	Count
 };

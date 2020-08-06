@@ -63,8 +63,14 @@ LogWriterFile::LogWriterFile(size_t buffer_size)
 
 	{
 		300, // buffer size for the mission log (can be kept fairly small)
-		perf_alloc(PC_ELAPSED, "logger_sd_write_mission"), perf_alloc(PC_ELAPSED, "logger_sd_fsync_mission")}
+		perf_alloc(PC_ELAPSED, "logger_sd_write_mission"), perf_alloc(PC_ELAPSED, "logger_sd_fsync_mission")},
+
+	{
+		math::max(buffer_size, _min_write_chunk + 300), // buffer size for the npnt log
+		perf_alloc(PC_ELAPSED, "logger_sd_write_npnt"), perf_alloc(PC_ELAPSED, "logger_sd_fsync_npnt")},
+
 }
+
 {
 	pthread_mutex_init(&_mtx, nullptr);
 	pthread_cond_init(&_cv, nullptr);
@@ -203,7 +209,7 @@ void LogWriterFile::run()
 			bool start = false;
 			pthread_mutex_lock(&_mtx);
 			pthread_cond_wait(&_cv, &_mtx);
-			start = _buffers[0]._should_run || _buffers[1]._should_run;
+			start = _buffers[0]._should_run || _buffers[1]._should_run || _buffers[2]._should_run;
 			pthread_mutex_unlock(&_mtx);
 
 			if (start) {
@@ -287,8 +293,8 @@ void LogWriterFile::run()
 			}
 
 
-			if (_buffers[0].fd() < 0 && _buffers[1].fd() < 0) {
-				// stop when both files are closed
+			if (_buffers[0].fd() < 0 && _buffers[1].fd() < 0 && _buffers[2].fd() < 0) {
+				// stop when all files are closed
 				break;
 			}
 
@@ -378,6 +384,8 @@ const char *log_type_str(LogType type)
 	case LogType::Full: return "full";
 
 	case LogType::Mission: return "mission";
+
+	case LogType::Npnt: return "npnt";
 
 	case LogType::Count: break;
 	}

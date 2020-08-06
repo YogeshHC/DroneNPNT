@@ -43,6 +43,19 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <memory.h>
+
+#include <uORB/uORB.h>
+#include <uORB/uORBTopics.h>
+#include <uORB/Subscription.hpp>
+#include <uORB/topics/log_message.h>
+#include <uORB/topics/parameter_update.h>
+#include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/vehicle_command_ack.h>
+#include <uORB/topics/manual_control_setpoint.h>
+#include <uORB/topics/vehicle_gps_position.h>
+#include <uORB/topics/permission_artifat_value.h>
+#include <px4_time.h>
 
 #include <uORB/PublicationQueued.hpp>
 #include <uORB/uORBTopics.h>
@@ -114,6 +127,81 @@ static void timer_callback(void *arg)
 }
 
 
+// Reverses a string 'str' of length 'len'
+void reverse(char* str, int len)
+{
+    int i = 0, j = len - 1, temp;
+    while (i < j) {
+        temp = str[i];
+        str[i] = str[j];
+        str[j] = temp;
+        i++;
+        j--;
+    }
+}
+
+// Converts a given integer x to string str[].
+// d is the number of digits required in the output.
+// If d is more than the number of digits in x,
+// then 0s are added at the beginning.
+void itoa(char str[], int x, int d)
+{
+	if(x == 0){
+		strcpy(str,"0\0");
+		return;
+	}else{
+		int i = 0;
+    if(x < 0){
+	    str[0] = '-';
+	    i++;
+    }
+    while (x) {
+        str[i++] = (x % 10) + '0';
+        x = x / 10;
+    }
+
+    // If number of digits required is more, then
+    // add 0s at the beginning
+    while (i < d)
+        str[i++] = '0';
+    reverse(str, i);
+    str[i] = '\0';
+	}
+
+}
+
+// Converts a floating-point/double number to a string.
+void ftoa(double n, char* res, int afterpoint)
+{
+    // Extract integer part
+    int ipart = (int)n;
+
+
+    // Extract floating part
+    double fpart = n - ipart;
+//     PX4_INFO("Double : %f;|| integer Part : %d;|| decimal part : %f",n,ipart,n-ipart);
+
+    // convert integer part to string
+    itoa( res,ipart, 0);
+    int i = 0;
+
+    while(res[i] != '\0' ) {i++;}
+
+    // check for display option after point
+    if (afterpoint != 0) {
+        res[i] = '.'; // add dot
+
+        // Get the value of fraction part upto given no.
+        // of points after dot. The third parameter
+        // is needed to handle cases like 233.007
+        fpart = fpart * pow(10, afterpoint);
+
+        itoa( res + i + 1,(int)fpart, afterpoint);
+    }
+}
+
+
+
 int logger_main(int argc, char *argv[])
 {
 	// logger currently assumes little endian
@@ -133,6 +221,8 @@ namespace logger
 {
 
 constexpr const char *Logger::LOG_ROOT[(int)LogType::Count];
+bool isFirstLog = true;
+bool isFirstMsgForLog = true;
 
 int Logger::custom_command(int argc, char *argv[])
 {
@@ -194,6 +284,13 @@ int Logger::print_status()
 		is_logging = true;
 	}
 
+
+	if(_writer.is_started(LogType::Npnt,LogWriter::BackendFile)){
+		PX4_INFO("Npnt File Logging Running:");
+		print_statistics(LogType::Npnt);
+		is_logging = true;
+	}
+
 	if (!is_logging) {
 		PX4_INFO("Not logging");
 	}
@@ -203,6 +300,9 @@ int Logger::print_status()
 
 void Logger::print_statistics(LogType type)
 {
+	if(type == LogType::Npnt){
+		return;
+	}
 	if (!_writer.is_started(type, LogWriter::BackendFile)) { //currently only statistics for file logging
 		return;
 	}
@@ -826,6 +926,19 @@ void Logger::run()
 	}
 
 	uORB::Subscription parameter_update_sub(ORB_ID(parameter_update));
+	//@Sai Sudheer
+	int vehicle_status_sub = orb_subscribe(ORB_ID(vehicle_status));
+	int log_message_sub = orb_subscribe(ORB_ID(log_message));
+	orb_set_interval(log_message_sub, 20);
+	int gps_pos_sub  = orb_subscribe(ORB_ID(vehicle_gps_position));
+	// orb_set_interval(gps_pos_sub,20);
+	int permission_artefact_sub = orb_subscribe(ORB_ID(permission_artifat_value));
+
+	int vehicle_command_sub = -1;
+
+	if (_writer.backend() & LogWriter::BackendMavlink) {
+		vehicle_command_sub = orb_subscribe(ORB_ID(vehicle_command));
+	}
 
 	// mission log topics if enabled (must be added first)
 	int32_t mission_log_mode = 0;
@@ -897,9 +1010,12 @@ void Logger::run()
 	uint32_t	total_bytes = 0;
 
 	px4_register_shutdown_hook(&Logger::request_stop_static);
-
+	mavlink_log_info(&_mavlink_log_pub,"Called",NULL);
 	if (_log_mode == LogMode::boot_until_disarm || _log_mode == LogMode::boot_until_shutdown) {
 		start_log_file(LogType::Full);
+		start_log_file(LogType::Npnt);
+		mavlink_log_info(&_mavlink_log_pub,"Start log file called :%s",log_type_str(LogType::Npnt));
+		// mavlink_log_info(&_mavlink_log_pub, "[logger] file: %s", file_name);
 	}
 
 	/* init the update timer */
@@ -1126,6 +1242,193 @@ void Logger::run()
 			}
 		}
 
+		// if(isFirstMsgForLog){
+		// 	start_log_file(LogType::Npnt);
+		// }
+		int ret = 0;
+		if(_writer.is_started(LogType::Npnt))
+		{
+			// mavlink_log_info(&_mavlink_log_pub,"NPNT writer started.",NULL);
+			if(true)
+			{
+			// open("/fs/microsd/hello.txt",)
+			_writer.lock();
+			//@author:saisudheer{
+				// write_message(LogType::Npnt,(void *)"Enter\n",6);
+
+				// Obtaining vehicle status
+				time_t t = time(0);
+				uint64_t timestamp = (uint64_t)t;
+				bool vstat_updated = false;
+				ret = orb_check(vehicle_status_sub, &vstat_updated);
+				vehicle_status_s v_stat ;
+				if(ret == 0 && vstat_updated){
+					orb_copy(ORB_ID(vehicle_status),vehicle_status_sub, &v_stat);
+					// mavlink_log_info(&_mavlink_log_pub,"Vehicle state updated",NULL);
+				}
+				// vehicle_status_s &veh_state_s = v_stat;
+				if( v_stat.arming_state == vehicle_status_s::ARMING_STATE_ARMED ){
+				// If the vehicle is armed
+					// write_message(LogType::Npnt,(void *)"Armed ",6);
+					// uORB::SubscriptionData<vehicle_gps_position_s> gps_pos{ORB_ID(vehicle_gps_position), 0};
+					// gps_pos.update();
+					mavlink_log_info(&_mavlink_log_pub,"NPNT Vehichle -armed",NULL);
+					vehicle_gps_position_s gps;
+					// Obtaining the current GPS coordinates for the vehichle
+					double lat,lng;
+					double* latitude = &lat;
+					double* longitude = &lng;
+					double altitude = 0.0;
+					orb_copy(ORB_ID(vehicle_gps_position),gps_pos_sub,&gps);
+					latitude = (double*) (malloc(1 * sizeof(double)));
+					*latitude =  gps.lat;
+					longitude = (double*) (malloc (1 * sizeof(double)));
+					*longitude =  gps.lon ;
+					altitude = gps.alt;
+					mavlink_log_info(&_mavlink_log_pub,"Lat:%.3f,long%.3f",*latitude,*longitude);
+					int ar_size = 0;
+
+					permission_artifat_value_s* _permission_artefact = (permission_artifat_value_s *)calloc(sizeof(permission_artifat_value_s),1);
+					orb_copy(ORB_ID(permission_artifat_value),permission_artefact_sub,_permission_artefact);
+
+					if(isFirstMsgForLog){ // Boolean flag to maintain the xml structure
+						char* st_header = (char*)(malloc(200 * sizeof(char)));
+						const uint32_t *pa_name = _permission_artefact->pa_name;
+						int size = 0;
+						for(int i=0; pa_name[i] != '\0';i++){
+							size++;
+						}
+						char* pa_char = (char*) (malloc(120 * sizeof(char)));
+						for(int i=0; i < size ;i++){
+							pa_char[i] = ((char)pa_name[i]);
+						}
+						pa_char[size]= '\0';
+						// strcpy(st_header,"{\"PermissionArtefact\":\"");
+						// strcat(st_header,pa_char);
+						// strcat(st_header,"\",\n\"FlightLog\":[\n");
+						snprintf(st_header,200, "{\"PermissionArtefact\":\"%s\",\n\"FlightLog\":[\n",pa_char);
+						ar_size = 0;
+						for(int i = 0; st_header[i] != '\0' ; i++){
+							ar_size++;
+						}
+
+						if(write_message(LogType::Npnt,(void *)st_header,ar_size))
+						{
+							PX4_WARN("Npnt log type Message  written to file");
+							//PX4_INFO( st_header);
+							//data_written = true;
+						}else{
+							PX4_WARN("Npnt log type Message is not written!!");
+						}
+
+						free(st_header);
+						free(pa_char);
+
+						isFirstMsgForLog = !isFirstMsgForLog;
+						ar_size = 0;
+					}
+
+					char *str = (char*) (malloc(200 * sizeof(char)));
+					char _start_char=' ';
+
+					int32_t _div_7 = ((int32_t) 10000000);
+
+					// char* tmp = (char*) (malloc(64 * sizeof(char)));
+					if(!isFirstLog){
+						_start_char = ',';
+
+					}else{
+						// strcpy(str,"{\"Timestamp\":");
+						_start_char = ' ';
+					}
+					snprintf(str,200,"%c{\"Tim+estamp\":%0.0f,\"Latitude\":%.5f,\"Longitude\":%.5f,\"Altitude\":%.2f}\n",
+					_start_char,(double)timestamp,(double)(*latitude / _div_7),(double)(*longitude/_div_7),(double) (altitude/((int32_t)1000)));
+
+					/**
+					 * @Reference only Delete after confirmation of working
+					 * */
+
+					// itoa(tmp,(int64_t)timestamp,0);
+					// strcat(str,tmp);
+					// strcat(str,",\"Latitude\":");
+					// free(tmp);
+					// tmp = (char*) (malloc(64 * sizeof(char)));
+					// ftoa((double)(*latitude / _div_7),tmp,5);
+					// strcat(str,tmp);
+					// free(tmp);
+					// tmp = (char*) (malloc(64 * sizeof(char)));
+					// strcat(str,",\"Longitude\":");
+					// ftoa((double)(*longitude/((int32_t) 10000000)),tmp,5);
+					// strcat(str,tmp);
+					// free(tmp);
+					// tmp = (char*) (malloc(64 * sizeof(char)));
+					// strcat(str,",\"Altitude\":");
+					// ftoa((double) (altitude/((int32_t)1000)),tmp,2);
+					// strcat(str,tmp);
+					// free(tmp);
+					// tmp = (char*) (malloc(64 * sizeof(char)));
+					// strcat(str,"}\n");
+					// free(tmp);
+					if(isFirstLog){
+						isFirstLog = false;
+					}
+					ar_size = 0;
+					for(int i = 0; str[i] != '\0' ; i++){
+						ar_size++;
+					}
+					if((((uint64_t)t) - ((uint64_t) prev_sync_time) >= 1 )){
+						prev_sync_time = t;
+						// continue;
+						if(write_message(LogType::Npnt,(void *)str,ar_size)){
+							mavlink_log_info(&_mavlink_log_pub,"LogString : (%s)",str);
+							// snprintf(str,strlen(str) +1,"%c{\"Tim+estamp\":%0.0f,\"Latitude\":%.5f,\"Longitude\":%.5f,\"Altitude\":%.2f}\n",
+							// _start_char,(double)timestamp,(double)(*latitude / _div_7),(double)(*longitude/((int32_t) 10000000)),(double) (altitude/((int32_t)1000)));
+						}else
+						// if(write_message(LogType::Npnt,(void *)"str\n",4))
+						{
+							mavlink_log_info(&_mavlink_log_pub,"Npnt log type Message is not written!!",NULL);
+						}
+					}
+					// Formating of the string done
+					free(_permission_artefact);
+					free(str);
+
+				}else{
+					// write_message(LogType::Npnt,(void *)"Dis-Armed\n",10);
+				// For the next time the drone armed  in the same power cycle
+					// mavlink_log_info(&_mavlink_log_pub,"NPNT Vehichle -Disarmed",NULL);
+					if(!isFirstMsgForLog && !isFirstLog){
+						char str[] = "]}";
+						int ar_size = 0;
+						for(int i = 0; str[i] != '\0' ; i++){
+							ar_size++;
+						}
+						if(write_message(LogType::Npnt,(void *)str,ar_size))
+						{
+							mavlink_log_info(&_mavlink_log_pub,"Npnt log type Message  written to file",NULL);
+							// data_written = true;
+						}else{
+							mavlink_log_info(&_mavlink_log_pub,"Npnt log type Message is not written!!",NULL);
+						}
+
+						isFirstMsgForLog = true;
+					}
+					isFirstLog = true;
+				}
+				// orb_unsubscribe(vStat);
+				/* release the log buffer */
+				_writer.unlock();
+
+			}
+				// /* notify the writer thread if data is available */
+				// if (data_written) {
+				// 	_writer.notify();
+				// }
+		} else {
+			// mavlink_log_info(&_mavlink_log_pub,"NPNT not started logging",NULL);
+			PX4_INFO("NPNT not logging");
+		}
+
 		// wait for next loop iteration...
 		if (polling_topic_sub >= 0) {
 			px4_pollfd_struct_t fds[1];
@@ -1156,6 +1459,7 @@ void Logger::run()
 	}
 
 	stop_log_file(LogType::Full);
+	stop_log_file(LogType::Npnt);
 	stop_log_file(LogType::Mission);
 
 	hrt_cancel(&timer_call);
@@ -1171,6 +1475,18 @@ void Logger::run()
 	if (_mavlink_log_pub) {
 		orb_unadvertise(_mavlink_log_pub);
 		_mavlink_log_pub = nullptr;
+	}
+
+	if (vehicle_command_sub != -1) {
+		orb_unsubscribe(vehicle_command_sub);
+	}
+
+	if(gps_pos_sub != -1){
+		orb_unsubscribe(gps_pos_sub);
+	}
+
+	if(permission_artefact_sub != -1){
+		orb_unsubscribe(permission_artefact_sub);
 	}
 
 	px4_unregister_shutdown_hook(&Logger::request_stop_static);
@@ -1252,6 +1568,8 @@ bool Logger::start_stop_logging(MissionLogType mission_log_type)
 		}
 
 		start_log_file(LogType::Full);
+		start_log_file(LogType::Npnt);
+
 		bret = true;
 
 		if (mission_log_type != MissionLogType::Disabled) {
@@ -1338,7 +1656,12 @@ int Logger::create_log_dir(LogType type, tm *tt, char *log_dir, int log_dir_len)
 	}
 
 	if (tt) {
-		strftime(file_name.log_dir, sizeof(LogFileName::log_dir), "%Y-%m-%d", tt);
+		// strftime(file_name.log_dir, sizeof(LogFileName::log_dir), "%Y-%m-%d", tt);
+		if(type == LogType::Npnt){
+			strftime(file_name.log_dir, sizeof(LogFileName::log_dir)+5, "npnt_%Y-%m-%d", tt);
+		}else{
+			strftime(file_name.log_dir, sizeof(LogFileName::log_dir), "%Y-%m-%d", tt);
+		}
 		strncpy(log_dir + n, file_name.log_dir, log_dir_len - n);
 		int mkdir_ret = mkdir(log_dir, S_IRWXU | S_IRWXG | S_IRWXO);
 
@@ -1418,9 +1741,20 @@ int Logger::get_log_file_name(LogType type, char *file_name, size_t file_name_si
 		}
 
 		char log_file_name_time[16] = "";
-		strftime(log_file_name_time, sizeof(log_file_name_time), "%H_%M_%S", &tt);
-		snprintf(log_file_name, sizeof(LogFileName::log_file_name), "%s%s.ulg", log_file_name_time, replay_suffix);
+		if(type == LogType::Npnt){
+			strftime(log_file_name_time, sizeof(log_file_name_time) + 5, "npnt_%H_%M_%S", &tt);
+
+		}else{
+			strftime(log_file_name_time, sizeof(log_file_name_time), "%H_%M_%S", &tt);
+		}
+		// strftime(log_file_name_time, sizeof(log_file_name_time), "%H_%M_%S", &tt);
+
+		snprintf(log_file_name, sizeof(LogFileName::log_file_name), "%s%s.%s", log_file_name_time, replay_suffix,(type == LogType::Npnt)? "txt": "ulg");
+		mavlink_log_info(&_mavlink_log_pub,"Log file Name: %s",log_file_name);
 		snprintf(file_name + n, file_name_size - n, "/%s", log_file_name);
+		// strftime(log_file_name_time, sizeof(log_file_name_time), "%H_%M_%S", &tt);
+		// snprintf(log_file_name, sizeof(LogFileName::log_file_name), "%s%s.ulg", log_file_name_time, replay_suffix);
+		// snprintf(file_name + n, file_name_size - n, "/%s", log_file_name);
 
 	} else {
 		int n = create_log_dir(type, nullptr, file_name, file_name_size);
@@ -1477,7 +1811,7 @@ void Logger::start_log_file(LogType type)
 		return;
 	}
 
-	if (type == LogType::Full) {
+	if (type == LogType::Full || type == LogType::Npnt) {
 		/* print logging path, important to find log file later */
 		mavlink_log_info(&_mavlink_log_pub, "[logger] file: %s", file_name);
 	}
@@ -1485,11 +1819,14 @@ void Logger::start_log_file(LogType type)
 	_writer.start_log_file(type, file_name);
 	_writer.select_write_backend(LogWriter::BackendFile);
 	_writer.set_need_reliable_transfer(true);
-	write_header(type);
-	write_version(type);
-	write_formats(type);
 
+	if (type != LogType::Npnt){
+		write_header(type);
+		write_version(type);
+		write_formats(type);
+	}
 	if (type == LogType::Full) {
+
 		write_parameters(type);
 		write_perf_data(true);
 		write_console_output();
@@ -1812,6 +2149,9 @@ void Logger::write_formats(LogType type)
 
 void Logger::write_all_add_logged_msg(LogType type)
 {
+	if(type == LogType::Npnt){
+		return;
+	}
 	_writer.lock();
 
 	size_t sub_count = _subscriptions.size();
